@@ -7,6 +7,8 @@ import com.debugbridge.core.mapping.PassthroughResolver;
 import com.debugbridge.core.refs.ObjectRefStore;
 import com.debugbridge.core.script.DirectDispatcher;
 import com.debugbridge.core.script.ScriptRuntime;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
@@ -61,5 +63,18 @@ class TimeoutTest {
         var result = runtime.execute("while (true) {}", 0);
         assertFalse(result.isSuccess());
         assertTrue(result.error.contains("1000ms"), "Should fall back to default timeout, got: " + result.error);
+    }
+
+    @Test
+    @Timeout(10)
+    void testExplicitCancellationInterruptsActiveExecution() throws Exception {
+        ScriptRuntime runtime = newRuntime();
+        CompletableFuture<ScriptRuntime.ExecutionResult> result =
+                CompletableFuture.supplyAsync(() -> runtime.execute("while (true) {}", 60_000));
+
+        Thread.sleep(250);
+        runtime.cancelCurrentExecution();
+
+        assertFalse(result.get(5, TimeUnit.SECONDS).isSuccess());
     }
 }

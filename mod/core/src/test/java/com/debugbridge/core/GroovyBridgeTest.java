@@ -175,12 +175,17 @@ class GroovyBridgeTest {
     }
 
     @Test
-    void testSecurityBlockingViaType() {
+    void testUnrestrictedAgentRuntimeAllowsRuntime() {
         var result = runtime.execute("java.type('java.lang.Runtime')");
-        assertFalse(result.isSuccess());
-        assertTrue(
-                result.error.contains("blocked") || result.error.contains("security"),
-                "Expected security error, got: " + result.error);
+        assertTrue(result.isSuccess(), "Expected unrestricted access, got: " + result.error);
+    }
+
+    @Test
+    void testCleanupCallbacksRunInReverseOrder() {
+        runtime.execute("events = []; cleanup.add { events << 'first' }; cleanup.add { events << 'second' }");
+        runtime.cleanupLease();
+        var result = runtime.execute("return events");
+        assertEquals(java.util.List.of("second", "first"), result.returnValue);
     }
 
     @Test

@@ -33,7 +33,7 @@ Two endpoint families are **gated off by default** in `config/debugbridge.json`:
 
 ### Groovy execution (`execute` endpoint)
 
-Run Groovy scripts inside the Minecraft JVM with full access to Minecraft APIs via a mapping-aware Java bridge — write Mojang names and they resolve to the runtime (intermediary) names automatically, even on obfuscated builds. Convenience globals `mc`, `player`, and `level` are pre-bound. The sandbox allows file I/O for reading/writing data. Each request has a configurable timeout (default 10s, max 5 min).
+Run Groovy scripts inside the Minecraft JVM with unrestricted authenticated access via a mapping-aware Java bridge — write Mojang names and they resolve to the runtime (intermediary) names automatically, even on obfuscated builds. Convenience globals `mc`, `player`, and `level` are pre-bound. Register temporary listeners/state with `cleanup.add { ... }`; callbacks run when the controlling connection closes. Each request has a configurable timeout (default 10s, max 5 min).
 
 ```groovy
 // Convenience globals already available

@@ -180,10 +180,9 @@ class IntegrationTest {
     }
 
     @Test
-    void testSecurityBlock() throws Exception {
+    void testUnrestrictedClassAccess() throws Exception {
         JsonObject resp = executeCode("java.type('java.lang.Runtime')");
-        assertFalse(resp.get("success").getAsBoolean());
-        assertTrue(resp.get("error").getAsString().contains("blocked"));
+        assertTrue(resp.get("success").getAsBoolean());
     }
 
     @Test

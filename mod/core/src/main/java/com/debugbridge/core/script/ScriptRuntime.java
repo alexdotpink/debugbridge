@@ -19,7 +19,6 @@ import java.util.concurrent.atomic.AtomicLong;
 import org.codehaus.groovy.control.CompilerConfiguration;
 import org.codehaus.groovy.control.MultipleCompilationErrorsException;
 import org.codehaus.groovy.control.customizers.ASTTransformationCustomizer;
-import org.codehaus.groovy.control.customizers.SecureASTCustomizer;
 import org.codehaus.groovy.runtime.MethodClosure;
 
 /**
@@ -34,6 +33,7 @@ import org.codehaus.groovy.runtime.MethodClosure;
 public class ScriptRuntime {
     private final GroovyShell shell;
     private final GroovyBridge bridge;
+    private final CleanupRegistry cleanup = new CleanupRegistry();
     private final StringBuilder printBuffer = new StringBuilder();
     private long maxExecutionTimeMs = 10_000;
     private ExecutorService executor;
@@ -50,6 +50,7 @@ public class ScriptRuntime {
         binding.setVariable("java", helpers);
         // Top-level `sync { ... }` sugar for the game-thread batching helper.
         binding.setVariable("sync", new MethodClosure(helpers, "sync"));
+        binding.setVariable("cleanup", cleanup);
         // Capture println/print output instead of writing to stdout.
         binding.setVariable("out", new PrintWriter(captureWriter(), true));
 
@@ -86,13 +87,6 @@ public class ScriptRuntime {
         // Inject interrupt checks into loops/methods so timeouts can stop runaway scripts.
         cfg.addCompilationCustomizers(new ASTTransformationCustomizer(ThreadInterrupt.class));
 
-        // Best-effort sandbox mirroring SecurityPolicy: block dangerous imports,
-        // including inline fully-qualified references (indirect import check).
-        SecureASTCustomizer sec = new SecureASTCustomizer();
-        sec.setIndirectImportCheckEnabled(true);
-        sec.setDisallowedImports(SecurityPolicy.BLOCKED_IMPORTS);
-        sec.setDisallowedStarImports(SecurityPolicy.BLOCKED_STAR_IMPORTS);
-        cfg.addCompilationCustomizers(sec);
         return cfg;
     }
 
@@ -102,6 +96,18 @@ public class ScriptRuntime {
 
     public void setMaxExecutionTimeMs(long ms) {
         this.maxExecutionTimeMs = ms;
+    }
+
+    /** Interrupt the currently executing script without acquiring the execution monitor. */
+    public void cancelCurrentExecution() {
+        Thread current = scriptThread;
+        if (current != null) current.interrupt();
+    }
+
+    /** Cancel active work and run all cleanup callbacks registered by this lease. */
+    public void cleanupLease() {
+        cancelCurrentExecution();
+        cleanup.runAll();
     }
 
     /** Execute Groovy code with the runtime's default timeout. */

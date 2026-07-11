@@ -81,19 +81,12 @@ public class GroovyBridge {
 
     // ==================== Class resolution ====================
 
-    /** Resolve a Mojang class name to a runtime {@link Class}, honoring the security policy. */
+    /** Resolve a Mojang class name to a runtime {@link Class}. */
     public Class<?> resolveClass(String mojangName) throws ClassNotFoundException {
         Class<?> cached = classCache.get(mojangName);
         if (cached != null) return cached;
 
-        if (!SecurityPolicy.isAllowed(mojangName)) {
-            throw new SecurityException("Access to " + mojangName + " is blocked by security policy");
-        }
         String runtimeName = resolver.resolveClass(mojangName);
-        if (!SecurityPolicy.isAllowed(runtimeName)) {
-            throw new SecurityException("Access to " + runtimeName + " is blocked by security policy");
-        }
-
         try {
             Class<?> cls = Class.forName(runtimeName);
             classCache.put(mojangName, cls);

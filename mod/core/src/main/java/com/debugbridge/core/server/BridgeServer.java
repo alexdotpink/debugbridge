@@ -361,13 +361,15 @@ public class BridgeServer extends WebSocketServer {
     @Override
     public void onClose(WebSocket conn, int code, String reason, boolean remote) {
         LOG.info("[DebugBridge] Client disconnected: " + reason);
+        boolean controlledLease = authenticatedConnections.remove(conn);
+        if (!controlledLease) return;
+        script.cleanupLease();
         refs.clear();
         // Highlights are transient debug state tied to a live session. Wipe them
         // so an abrupt disconnect (tab close, killed MCP server, network drop)
         // can't leave glow orphaned in-world until the client restarts.
         ClientEntityGlowManager.clear();
         ClientBlockGlowManager.clear();
-        authenticatedConnections.remove(conn);
         ClientControlProvider control = clientControlProvider;
         if (control != null) control.cleanup();
     }

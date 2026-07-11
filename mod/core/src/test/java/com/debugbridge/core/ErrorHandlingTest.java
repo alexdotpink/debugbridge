@@ -129,26 +129,21 @@ class ErrorHandlingTest {
     }
 
     @Test
-    void testSecurityBlocked() throws Exception {
+    void testRuntimeAllowedForAuthenticatedAgent() throws Exception {
         JsonObject resp = execute("java.type('java.lang.Runtime')");
-        assertFalse(resp.get("success").getAsBoolean());
-        String error = resp.get("error").getAsString();
-        assertTrue(error.contains("blocked") || error.contains("security"), "Should mention security: " + error);
+        assertTrue(resp.get("success").getAsBoolean());
     }
 
     @Test
-    void testSecurityBlockedProcessBuilder() throws Exception {
+    void testProcessBuilderAllowedForAuthenticatedAgent() throws Exception {
         JsonObject resp = execute("java.type('java.lang.ProcessBuilder')");
-        assertFalse(resp.get("success").getAsBoolean());
+        assertTrue(resp.get("success").getAsBoolean());
     }
 
     @Test
-    void testNativeRuntimeBlockedBySandbox() throws Exception {
-        // Groovy auto-imports java.lang.*, so `Runtime` is reachable inline; the
-        // SecureASTCustomizer import blacklist must reject it at compile time.
-        JsonObject resp = execute("Runtime.getRuntime()");
-        assertFalse(resp.get("success").getAsBoolean());
-        System.out.println("Native Runtime block: " + resp.get("error").getAsString());
+    void testNativeRuntimeAllowedForAuthenticatedAgent() throws Exception {
+        JsonObject resp = execute("return Runtime.getRuntime() != null");
+        assertTrue(resp.get("success").getAsBoolean());
     }
 
     @Test

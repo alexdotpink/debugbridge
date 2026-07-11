@@ -17,8 +17,9 @@ import org.junit.jupiter.api.*;
 
 /**
  * Regression tests for the input-validation and injection hardening on
- * {@code search} and {@code runCommand}. These cover the wire-facing surface;
- * deeper sandbox hardening is tracked separately in the dream review queue.
+ * {@code search} and {@code runCommand}. Arbitrary Groovy is intentionally
+ * unrestricted after loopback token authentication; these tests cover typed
+ * wire operations that still require bounded input handling.
  */
 class SecurityHardeningTest {
     private static BridgeServer server;
