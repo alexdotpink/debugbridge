@@ -1,6 +1,8 @@
 # DebugBridge
 
-A Fabric client mod for Minecraft (1.19, 1.21.11, exact 26.1, and stable 26.2) that exposes game state over a local WebSocket server, plus a Vue web UI for visual inspection. Built for AI-assisted Minecraft development and debugging.
+A Fabric client mod for Minecraft (1.19, exact 1.21.10, 1.21.11, exact 26.1, and stable 26.2) that exposes game state over a local WebSocket server, plus a Vue web UI for visual inspection. Built for AI-assisted Minecraft development and debugging.
+
+The exact 1.21.10 adapter adds the agent-driven testing surface used by mGameMaker: token authentication, real key/mouse input, revision-safe widget and container actions, structured HUD/event inspection, and a signed `mgamemaker:test_control` transport. Arbitrary persistent Groovy execution remains the primary exploration capability.
 
 ## What It Does
 

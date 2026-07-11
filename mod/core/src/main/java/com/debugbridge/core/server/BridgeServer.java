@@ -5,6 +5,8 @@ import com.debugbridge.core.block.ClientBlockGlowManager;
 import com.debugbridge.core.block.NearbyBlocksProvider;
 import com.debugbridge.core.chat.ChatHistoryProvider;
 import com.debugbridge.core.command.CommandProvider;
+import com.debugbridge.core.control.ClientControlProvider;
+import com.debugbridge.core.control.TestControlProvider;
 import com.debugbridge.core.entity.ClientEntityGlowManager;
 import com.debugbridge.core.entity.LookedAtEntityProvider;
 import com.debugbridge.core.entity.NearbyEntitiesProvider;
@@ -41,9 +43,13 @@ import com.debugbridge.core.texture.ItemTextureProvider;
 import com.google.gson.*;
 import java.net.BindException;
 import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.MessageDigest;
 import java.util.List;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -152,6 +158,17 @@ public class BridgeServer extends WebSocketServer {
     /** Loopback port of the bundled web UI; null when the UI isn't running. */
     private volatile Integer webUiPort = null;
 
+    /** Optional per-instance token. Blank keeps legacy interactive installs compatible. */
+    private volatile String authToken = "";
+
+    /** Connections that completed the token handshake. */
+    private final Set<WebSocket> authenticatedConnections = ConcurrentHashMap.newKeySet();
+
+    /** Optional deterministic control adapter (currently provided by the exact 1.21.10 module). */
+    private volatile ClientControlProvider clientControlProvider;
+
+    private volatile TestControlProvider testControlProvider;
+
     /** Lazily-built flattened mapping search entries for this resolver. */
     private volatile List<SearchEntry> searchEntries;
 
@@ -210,6 +227,27 @@ public class BridgeServer extends WebSocketServer {
     /** Loopback port of the bundled web UI, surfaced in {@code status}; null when not running. */
     public void setWebUiPort(Integer port) {
         this.webUiPort = port;
+    }
+
+    public void setAuthToken(String token) {
+        this.authToken = token == null ? "" : token;
+    }
+
+    public void setClientControlProvider(ClientControlProvider provider) {
+        this.clientControlProvider = provider;
+        LOG.info("[DebugBridge] Client control provider registered: "
+                + provider.getClass().getSimpleName());
+    }
+
+    public void setTestControlProvider(TestControlProvider provider) {
+        this.testControlProvider = provider;
+        LOG.info("[DebugBridge] Test control provider registered: "
+                + provider.getClass().getSimpleName());
+    }
+
+    public void tickClientControl() {
+        ClientControlProvider control = clientControlProvider;
+        if (control != null) control.onClientTick();
     }
 
     public void setSessionControlProvider(SessionControlProvider provider) {
@@ -317,6 +355,7 @@ public class BridgeServer extends WebSocketServer {
     @Override
     public void onOpen(WebSocket conn, ClientHandshake handshake) {
         LOG.info("[DebugBridge] Client connected: " + conn.getRemoteSocketAddress());
+        if (authToken.isBlank()) authenticatedConnections.add(conn);
     }
 
     @Override
@@ -328,6 +367,9 @@ public class BridgeServer extends WebSocketServer {
         // can't leave glow orphaned in-world until the client restarts.
         ClientEntityGlowManager.clear();
         ClientBlockGlowManager.clear();
+        authenticatedConnections.remove(conn);
+        ClientControlProvider control = clientControlProvider;
+        if (control != null) control.cleanup();
     }
 
     @Override
@@ -341,6 +383,15 @@ public class BridgeServer extends WebSocketServer {
             }
             if (req.id != null) {
                 requestId = req.id;
+            }
+            if (!authenticatedConnections.contains(conn)) {
+                if (!"authenticate".equals(req.type)) {
+                    sendErrorResponse(conn, requestId, "AUTH_REQUIRED: authenticate before using DebugBridge");
+                    return;
+                }
+                BridgeResponse auth = handleAuthenticate(conn, req);
+                sendResponse(conn, auth);
+                return;
             }
             BridgeResponse resp = handleRequest(req);
             sendResponse(conn, resp);
@@ -395,6 +446,14 @@ public class BridgeServer extends WebSocketServer {
         try {
             return switch (req.type) {
                 case "execute" -> handleExecute(req);
+                case "capabilities" -> handleCapabilities(req);
+                case "input" -> handleInput(req);
+                case "look" -> handleLook(req);
+                case "screenState" -> handleScreenState(req);
+                case "screenAction" -> handleScreenAction(req);
+                case "hudInspect" -> handleHudInspect(req);
+                case "events" -> handleEvents(req);
+                case "testControl" -> handleTestControl(req);
                 case "search" -> handleSearch(req);
                 case "snapshot" -> handleSnapshot(req);
                 case "screenshot" -> handleScreenshot(req);
@@ -425,6 +484,86 @@ public class BridgeServer extends WebSocketServer {
         } catch (Exception e) {
             return BridgeResponse.error(req.id, ErrorFormatter.withContext("request handling", e));
         }
+    }
+
+    private BridgeResponse handleAuthenticate(WebSocket conn, BridgeRequest req) {
+        String supplied = req.payload != null && req.payload.has("token")
+                ? req.payload.get("token").getAsString()
+                : "";
+        boolean matches = MessageDigest.isEqual(
+                authToken.getBytes(StandardCharsets.UTF_8), supplied.getBytes(StandardCharsets.UTF_8));
+        if (!matches) return BridgeResponse.error(req.id, "AUTH_FAILED: invalid token");
+        authenticatedConnections.add(conn);
+        JsonObject result = new JsonObject();
+        result.addProperty("authenticated", true);
+        result.addProperty("protocolVersion", 1);
+        return successJson(req.id, result);
+    }
+
+    private BridgeResponse handleCapabilities(BridgeRequest req) {
+        JsonObject result = new JsonObject();
+        result.addProperty("protocolVersion", 1);
+        result.addProperty("execute", true);
+        result.addProperty("persistentBindings", true);
+        result.addProperty("clientControl", clientControlProvider != null);
+        result.addProperty("recording", recordingProvider != null);
+        result.addProperty("sessionControl", sessionControlEnabled && sessionControlProvider != null);
+        result.addProperty("runCommand", runCommandEnabled && commandProvider != null);
+        result.addProperty("testControl", testControlProvider != null);
+        return successJson(req.id, result);
+    }
+
+    private BridgeResponse requireControl(BridgeRequest req, ControlCall call, String name) {
+        ClientControlProvider control = clientControlProvider;
+        if (control == null) return BridgeResponse.error(req.id, name + ": client control is unavailable");
+        try {
+            return successJson(req.id, call.call(control));
+        } catch (Exception e) {
+            return BridgeResponse.error(req.id, name + " failed: " + ErrorFormatter.format(e));
+        }
+    }
+
+    private BridgeResponse handleInput(BridgeRequest req) {
+        return requireControl(req, c -> c.applyInput(payloadOrEmpty(req)), "input");
+    }
+
+    private BridgeResponse handleLook(BridgeRequest req) {
+        return requireControl(req, c -> c.applyLook(payloadOrEmpty(req)), "look");
+    }
+
+    private BridgeResponse handleScreenState(BridgeRequest req) {
+        return requireControl(req, ClientControlProvider::inspectScreen, "screenState");
+    }
+
+    private BridgeResponse handleScreenAction(BridgeRequest req) {
+        return requireControl(req, c -> c.screenAction(payloadOrEmpty(req)), "screenAction");
+    }
+
+    private BridgeResponse handleHudInspect(BridgeRequest req) {
+        return requireControl(req, ClientControlProvider::inspectHud, "hudInspect");
+    }
+
+    private BridgeResponse handleEvents(BridgeRequest req) {
+        return requireControl(req, c -> c.readEvents(payloadOrEmpty(req)), "events");
+    }
+
+    private BridgeResponse handleTestControl(BridgeRequest req) {
+        TestControlProvider provider = testControlProvider;
+        if (provider == null) return BridgeResponse.error(req.id, "testControl: provider is unavailable");
+        try {
+            return successJson(req.id, provider.request(payloadOrEmpty(req)));
+        } catch (Exception e) {
+            return BridgeResponse.error(req.id, "testControl failed: " + ErrorFormatter.format(e));
+        }
+    }
+
+    private static JsonObject payloadOrEmpty(BridgeRequest req) {
+        return req.payload == null ? new JsonObject() : req.payload;
+    }
+
+    @FunctionalInterface
+    private interface ControlCall {
+        JsonObject call(ClientControlProvider provider) throws Exception;
     }
 
     private static BridgeResponse successJson(String reqId, JsonElement result) {

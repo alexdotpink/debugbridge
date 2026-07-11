@@ -24,6 +24,8 @@ class BridgeConfigTest {
                   "run_command_enabled": true,
                   "session_control_enabled": true,
                   "web_ui_enabled": false,
+                  "auth_token": "bridge-token",
+                  "test_control_secret": "test-secret",
                   "script": {
                     "max_execution_time_ms": 7000
                   }
@@ -39,6 +41,8 @@ class BridgeConfigTest {
         assertTrue(config.runCommandEnabled);
         assertTrue(config.sessionControlEnabled);
         assertFalse(config.webUiEnabled);
+        assertEquals("bridge-token", config.authToken);
+        assertEquals("test-secret", config.testControlSecret);
         assertEquals(7000, config.scriptMaxExecutionTimeMs);
     }
 
@@ -100,6 +104,8 @@ class BridgeConfigTest {
         config.sessionControlEnabled = true;
         config.webUiEnabled = false;
         config.scriptMaxExecutionTimeMs = 9000;
+        config.authToken = "saved-bridge-token";
+        config.testControlSecret = "saved-test-secret";
 
         config.save();
 
@@ -112,6 +118,8 @@ class BridgeConfigTest {
         assertTrue(saved.get("run_command_enabled").getAsBoolean());
         assertTrue(saved.get("session_control_enabled").getAsBoolean());
         assertFalse(saved.get("web_ui_enabled").getAsBoolean());
+        assertEquals("saved-bridge-token", saved.get("auth_token").getAsString());
+        assertEquals("saved-test-secret", saved.get("test_control_secret").getAsString());
         assertEquals(
                 9000,
                 saved.getAsJsonObject("script").get("max_execution_time_ms").getAsLong());

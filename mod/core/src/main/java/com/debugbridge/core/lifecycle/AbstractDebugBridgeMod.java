@@ -106,6 +106,7 @@ public abstract class AbstractDebugBridgeMod {
         }
 
         onPostTick();
+        if (server != null) server.tickClientControl();
 
         if (!needsWarning) {
             return;
@@ -152,6 +153,15 @@ public abstract class AbstractDebugBridgeMod {
         server.setScreenInspectProvider(createScreenInspectProvider());
         server.setCommandProvider(createCommandProvider());
         server.setRunCommandEnabled(config.runCommandEnabled);
+        server.setAuthToken(config.authToken);
+        var clientControl = createClientControlProvider();
+        if (clientControl != null) {
+            server.setClientControlProvider(clientControl);
+        }
+        var testControl = createTestControlProvider(config.testControlSecret);
+        if (testControl != null) {
+            server.setTestControlProvider(testControl);
+        }
         SessionControlProvider sessionControl = createSessionControlProvider();
         if (sessionControl != null) {
             server.setSessionControlProvider(sessionControl);
@@ -384,6 +394,16 @@ public abstract class AbstractDebugBridgeMod {
     protected abstract CommandProvider createCommandProvider();
 
     protected abstract SessionControlProvider createSessionControlProvider();
+
+    /** Optional deterministic client-control adapter; legacy versions may omit it. */
+    protected com.debugbridge.core.control.ClientControlProvider createClientControlProvider() {
+        return null;
+    }
+
+    /** Optional signed transport to a test server's structured control channel. */
+    protected com.debugbridge.core.control.TestControlProvider createTestControlProvider(String secret) {
+        return null;
+    }
 
     /**
      * Build the per-frame capture primitive for {@code record_video}. Default

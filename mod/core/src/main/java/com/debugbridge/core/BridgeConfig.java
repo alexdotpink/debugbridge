@@ -7,6 +7,8 @@ import com.google.gson.annotations.SerializedName;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.SecureRandom;
+import java.util.HexFormat;
 import java.util.logging.Logger;
 
 /**
@@ -63,6 +65,18 @@ public class BridgeConfig {
      */
     @SerializedName("web_ui_enabled")
     public boolean webUiEnabled = true;
+
+    /**
+     * Optional high-entropy token required as the first WebSocket request.
+     * Automation profiles always configure this. Blank preserves compatibility
+     * for existing interactive installations until they opt in.
+     */
+    @SerializedName("auth_token")
+    public String authToken = "";
+
+    /** Shared FumazTest custom-payload secret; blank disables the server test-control endpoint. */
+    @SerializedName("test_control_secret")
+    public String testControlSecret = "";
 
     private ScriptConfig script;
 
@@ -137,6 +151,8 @@ public class BridgeConfig {
         copy.runCommandEnabled = runCommandEnabled;
         copy.sessionControlEnabled = sessionControlEnabled;
         copy.webUiEnabled = webUiEnabled;
+        copy.authToken = authToken;
+        copy.testControlSecret = testControlSecret;
         copy.script = new ScriptConfig(scriptMaxExecutionTimeMs);
         return copy;
     }
@@ -147,6 +163,19 @@ public class BridgeConfig {
         maxResults = validatePositiveInt("max_results", maxResults, DEFAULT_MAX_RESULTS);
         scriptMaxExecutionTimeMs = validatePositiveLong(
                 "script.max_execution_time_ms", scriptMaxExecutionTimeMs, DEFAULT_SCRIPT_MAX_EXECUTION_TIME_MS);
+        if (authToken == null) authToken = "";
+        if (testControlSecret == null) testControlSecret = "";
+    }
+
+    /** Generate and persist a 256-bit token when an automation profile needs one. */
+    public String ensureAuthToken() {
+        if (authToken == null || authToken.isBlank()) {
+            byte[] bytes = new byte[32];
+            new SecureRandom().nextBytes(bytes);
+            authToken = HexFormat.of().formatHex(bytes);
+            save();
+        }
+        return authToken;
     }
 
     private static int validateIntRange(String name, int value, int min, int max, int fallback) {

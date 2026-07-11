@@ -1,0 +1,15 @@
+{
+  "required": true,
+  "package": "com.debugbridge.fabric12110.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "client": [
+    "BossHealthOverlayAccessor",
+    "EntityGlowMixin",
+    "GuiAccessor",
+    "PlayerTabOverlayAccessor",
+    "MinecraftClientMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}
