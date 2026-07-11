@@ -15,6 +15,7 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
@@ -32,6 +33,9 @@ public final class Minecraft12110TestControlProvider implements TestControlProvi
     private static final SecureRandom RANDOM = new SecureRandom();
     private static final Map<String, CompletableFuture<JsonObject>> PENDING = new ConcurrentHashMap<>();
     private static volatile boolean registered;
+    private static volatile long lastReceivedAt;
+    private static volatile String lastReceivedRequestId = "none";
+    private static volatile String lastReceiverError = "none";
 
     private final byte[] secret;
 
@@ -75,7 +79,17 @@ public final class Minecraft12110TestControlProvider implements TestControlProvi
         PENDING.put(requestId, response);
         try {
             ClientPlayNetworking.send(new TestControlPayload(bytes));
-            JsonObject value = response.get(timeoutMs, TimeUnit.MILLISECONDS);
+            JsonObject value;
+            try {
+                value = response.get(timeoutMs, TimeUnit.MILLISECONDS);
+            } catch (TimeoutException exception) {
+                boolean sendable = ClientPlayNetworking.canSend(TestControlPayload.TYPE);
+                throw new IllegalStateException(
+                        "response timeout after " + timeoutMs + "ms; sendable=" + sendable
+                                + ", pending=" + PENDING.size() + ", lastReceivedRequestId=" + lastReceivedRequestId
+                                + ", lastReceivedAt=" + lastReceivedAt + ", lastReceiverError=" + lastReceiverError,
+                        exception);
+            }
             verifyResponse(value);
             return value;
         } finally {
@@ -146,9 +160,13 @@ public final class Minecraft12110TestControlProvider implements TestControlProvi
             try {
                 JsonObject response = GSON.fromJson(new String(payload.data, StandardCharsets.UTF_8), JsonObject.class);
                 String requestId = response.get("requestId").getAsString();
+                lastReceivedAt = System.currentTimeMillis();
+                lastReceivedRequestId = requestId;
+                lastReceiverError = "none";
                 CompletableFuture<JsonObject> pending = PENDING.get(requestId);
                 if (pending != null) pending.complete(response);
-            } catch (Exception ignored) {
+            } catch (Exception exception) {
+                lastReceiverError = exception.getClass().getSimpleName() + ": " + exception.getMessage();
                 // The matching request times out with its requestId retained for evidence.
             }
         });
