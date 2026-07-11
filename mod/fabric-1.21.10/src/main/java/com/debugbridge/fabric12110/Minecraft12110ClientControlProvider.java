@@ -211,8 +211,11 @@ public final class Minecraft12110ClientControlProvider implements ClientControlP
                     if (!(child instanceof AbstractWidget aw))
                         throw new IllegalArgumentException("widget is not clickable");
                     int button = integer(payload, "button", 0);
-                    handled = aw.mouseClicked(
-                            mouse(aw.getX() + aw.getWidth() / 2.0, aw.getY() + aw.getHeight() / 2.0, button), false);
+                    if (!aw.active || !aw.visible) throw new IllegalStateException("widget is not active and visible");
+                    MouseButtonEvent event =
+                            mouse(aw.getX() + aw.getWidth() / 2.0, aw.getY() + aw.getHeight() / 2.0, button);
+                    aw.onClick(event, false);
+                    handled = true;
                 }
                 case "clickAt" ->
                     handled = screen.mouseClicked(
@@ -244,6 +247,7 @@ public final class Minecraft12110ClientControlProvider implements ClientControlP
                 }
                 default -> throw new IllegalArgumentException("unknown screen action: " + action);
             }
+            updateScreenRevision(mc.screen);
             JsonObject result = new JsonObject();
             result.addProperty("action", action);
             result.addProperty("handled", handled);
