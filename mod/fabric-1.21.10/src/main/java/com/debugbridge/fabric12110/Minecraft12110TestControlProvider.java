@@ -8,6 +8,7 @@ import com.google.gson.JsonObject;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
+import java.util.Base64;
 import java.util.HexFormat;
 import java.util.Map;
 import java.util.TreeMap;
@@ -18,8 +19,10 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
+import net.fabricmc.fabric.api.client.message.v1.ClientReceiveMessageEvents;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
 import net.fabricmc.fabric.api.networking.v1.PayloadTypeRegistry;
+import net.minecraft.client.Minecraft;
 import net.minecraft.network.RegistryFriendlyByteBuf;
 import net.minecraft.network.codec.StreamCodec;
 import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
@@ -29,7 +32,9 @@ import net.minecraft.resources.ResourceLocation;
 public final class Minecraft12110TestControlProvider implements TestControlProvider {
     private static final Gson GSON = new Gson();
     private static final String HMAC = "HmacSHA256";
+    private static final String RESPONSE_PREFIX = "[mgamemaker:test_control:v1]";
     private static final int MAX_BYTES = 30_000;
+    private static final int DIRECT_TRANSPORT_WAIT_MS = 1_200;
     private static final SecureRandom RANDOM = new SecureRandom();
     private static final Map<String, CompletableFuture<JsonObject>> PENDING = new ConcurrentHashMap<>();
     private static volatile boolean registered;
@@ -58,43 +63,97 @@ public final class Minecraft12110TestControlProvider implements TestControlProvi
                 ? Math.max(1_000, Math.min(payload.get("timeoutMs").getAsInt(), 30_000))
                 : 10_000;
 
-        String requestId = UUID.randomUUID().toString();
-        long timestamp = System.currentTimeMillis();
-        byte[] nonceBytes = new byte[24];
-        RANDOM.nextBytes(nonceBytes);
-        String nonce = HexFormat.of().formatHex(nonceBytes);
-
-        JsonObject request = new JsonObject();
-        request.addProperty("version", "1");
-        request.addProperty("requestId", requestId);
-        request.addProperty("timestamp", timestamp);
-        request.addProperty("nonce", nonce);
-        request.addProperty("operation", operation);
-        request.add("args", args);
-        request.addProperty("signature", signRequest(request));
-
-        byte[] bytes = GSON.toJson(request).getBytes(StandardCharsets.UTF_8);
-        if (bytes.length > MAX_BYTES) throw new IllegalArgumentException("test-control request is too large");
-        CompletableFuture<JsonObject> response = new CompletableFuture<>();
-        PENDING.put(requestId, response);
+        long startedAt = System.nanoTime();
+        JsonObject directRequest = buildRequest(operation, args);
+        CompletableFuture<JsonObject> directResponse = registerPending(directRequest);
         try {
-            ClientPlayNetworking.send(new TestControlPayload(bytes));
+            ClientPlayNetworking.send(new TestControlPayload(encodeRequest(directRequest)));
+            try {
+                JsonObject value =
+                        directResponse.get(Math.min(timeoutMs, DIRECT_TRANSPORT_WAIT_MS), TimeUnit.MILLISECONDS);
+                verifyResponse(value);
+                return value;
+            } catch (TimeoutException ignored) {
+                // Velocity can advertise the payload channel while dropping C2S payloads.
+            }
+        } finally {
+            PENDING.remove(directRequest.get("requestId").getAsString());
+        }
+
+        int elapsedMs = (int) TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt);
+        int remainingMs = timeoutMs - elapsedMs;
+        if (remainingMs < 1) throw timeout(timeoutMs, "custom-payload");
+
+        // Use a distinct signed request so a delayed direct request cannot trip replay protection.
+        JsonObject fallbackRequest = buildRequest(operation, args);
+        byte[] fallbackBytes = encodeRequest(fallbackRequest);
+        String command =
+                "mgtestcontrol " + Base64.getUrlEncoder().withoutPadding().encodeToString(fallbackBytes);
+        if (command.length() > MAX_BYTES)
+            throw new IllegalArgumentException("test-control fallback command is too large");
+        CompletableFuture<JsonObject> fallbackResponse = registerPending(fallbackRequest);
+        try {
+            dispatchCommand(command).get(Math.min(remainingMs, 2_000), TimeUnit.MILLISECONDS);
             JsonObject value;
             try {
-                value = response.get(timeoutMs, TimeUnit.MILLISECONDS);
+                value = fallbackResponse.get(remainingMs, TimeUnit.MILLISECONDS);
             } catch (TimeoutException exception) {
-                boolean sendable = ClientPlayNetworking.canSend(TestControlPayload.TYPE);
-                throw new IllegalStateException(
-                        "response timeout after " + timeoutMs + "ms; sendable=" + sendable
-                                + ", pending=" + PENDING.size() + ", lastReceivedRequestId=" + lastReceivedRequestId
-                                + ", lastReceivedAt=" + lastReceivedAt + ", lastReceiverError=" + lastReceiverError,
-                        exception);
+                throw timeout(timeoutMs, "command-fallback");
             }
             verifyResponse(value);
             return value;
         } finally {
-            PENDING.remove(requestId);
+            PENDING.remove(fallbackRequest.get("requestId").getAsString());
         }
+    }
+
+    private JsonObject buildRequest(String operation, JsonObject args) throws Exception {
+        byte[] nonceBytes = new byte[24];
+        RANDOM.nextBytes(nonceBytes);
+        JsonObject request = new JsonObject();
+        request.addProperty("version", "1");
+        request.addProperty("requestId", UUID.randomUUID().toString());
+        request.addProperty("timestamp", System.currentTimeMillis());
+        request.addProperty("nonce", HexFormat.of().formatHex(nonceBytes));
+        request.addProperty("operation", operation);
+        request.add("args", args.deepCopy());
+        request.addProperty("signature", signRequest(request));
+        return request;
+    }
+
+    private static byte[] encodeRequest(JsonObject request) {
+        byte[] bytes = GSON.toJson(request).getBytes(StandardCharsets.UTF_8);
+        if (bytes.length > MAX_BYTES) throw new IllegalArgumentException("test-control request is too large");
+        return bytes;
+    }
+
+    private static CompletableFuture<JsonObject> registerPending(JsonObject request) {
+        CompletableFuture<JsonObject> response = new CompletableFuture<>();
+        PENDING.put(request.get("requestId").getAsString(), response);
+        return response;
+    }
+
+    private static CompletableFuture<Void> dispatchCommand(String command) {
+        CompletableFuture<Void> dispatched = new CompletableFuture<>();
+        Minecraft minecraft = Minecraft.getInstance();
+        minecraft.execute(() -> {
+            try {
+                if (minecraft.getConnection() == null) throw new IllegalStateException("not connected to a server");
+                minecraft.getConnection().sendCommand(command);
+                dispatched.complete(null);
+            } catch (Exception exception) {
+                dispatched.completeExceptionally(exception);
+            }
+        });
+        return dispatched;
+    }
+
+    private static IllegalStateException timeout(int timeoutMs, String transport) {
+        boolean sendable = ClientPlayNetworking.canSend(TestControlPayload.TYPE);
+        return new IllegalStateException("response timeout after " + timeoutMs + "ms via " + transport
+                + "; sendable=" + sendable + ", pending=" + PENDING.size()
+                + ", lastReceivedRequestId=" + lastReceivedRequestId + ", lastReceivedAt=" + lastReceivedAt
+                + ", lastReceiverError=" + lastReceiverError);
     }
 
     private String signRequest(JsonObject request) throws Exception {
@@ -157,20 +216,35 @@ public final class Minecraft12110TestControlProvider implements TestControlProvi
         PayloadTypeRegistry.playS2C().register(TestControlPayload.TYPE, TestControlPayload.CODEC);
         ClientPlayNetworking.registerGlobalReceiver(TestControlPayload.TYPE, (payload, context) -> {
             if (payload.data.length == 0 || payload.data.length > MAX_BYTES) return;
+            acceptResponse(payload.data);
+        });
+        ClientReceiveMessageEvents.ALLOW_GAME.register((message, overlay) -> {
+            String text = message.getString();
+            if (!text.startsWith(RESPONSE_PREFIX)) return true;
             try {
-                JsonObject response = GSON.fromJson(new String(payload.data, StandardCharsets.UTF_8), JsonObject.class);
-                String requestId = response.get("requestId").getAsString();
-                lastReceivedAt = System.currentTimeMillis();
-                lastReceivedRequestId = requestId;
-                lastReceiverError = "none";
-                CompletableFuture<JsonObject> pending = PENDING.get(requestId);
-                if (pending != null) pending.complete(response);
+                acceptResponse(Base64.getUrlDecoder().decode(text.substring(RESPONSE_PREFIX.length())));
             } catch (Exception exception) {
                 lastReceiverError = exception.getClass().getSimpleName() + ": " + exception.getMessage();
-                // The matching request times out with its requestId retained for evidence.
             }
+            return false;
         });
         registered = true;
+    }
+
+    private static void acceptResponse(byte[] bytes) {
+        try {
+            if (bytes.length == 0 || bytes.length > MAX_BYTES)
+                throw new IllegalArgumentException("invalid response size");
+            JsonObject response = GSON.fromJson(new String(bytes, StandardCharsets.UTF_8), JsonObject.class);
+            String requestId = response.get("requestId").getAsString();
+            lastReceivedAt = System.currentTimeMillis();
+            lastReceivedRequestId = requestId;
+            lastReceiverError = "none";
+            CompletableFuture<JsonObject> pending = PENDING.get(requestId);
+            if (pending != null) pending.complete(response);
+        } catch (Exception exception) {
+            lastReceiverError = exception.getClass().getSimpleName() + ": " + exception.getMessage();
+        }
     }
 
     public record TestControlPayload(byte[] data) implements CustomPacketPayload {
