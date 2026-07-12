@@ -8,9 +8,12 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
@@ -19,9 +22,11 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.Options;
 import net.minecraft.client.gui.components.AbstractWidget;
 import net.minecraft.client.gui.components.LerpingBossEvent;
+import net.minecraft.client.gui.components.events.ContainerEventHandler;
 import net.minecraft.client.gui.components.events.GuiEventListener;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen;
+import net.minecraft.client.input.CharacterEvent;
 import net.minecraft.client.input.KeyEvent;
 import net.minecraft.client.input.MouseButtonEvent;
 import net.minecraft.client.input.MouseButtonInfo;
@@ -39,6 +44,7 @@ import net.minecraft.world.item.component.ItemLore;
 import net.minecraft.world.scores.DisplaySlot;
 import net.minecraft.world.scores.Objective;
 import net.minecraft.world.scores.PlayerScoreEntry;
+import net.minecraft.world.scores.PlayerTeam;
 import net.minecraft.world.scores.Scoreboard;
 
 /** Real-input and UI adapter for exact Minecraft 1.21.10. */
@@ -145,24 +151,7 @@ public final class Minecraft12110ClientControlProvider implements ClientControlP
         result.addProperty("height", screen.height);
 
         JsonArray widgets = new JsonArray();
-        List<? extends GuiEventListener> children = screen.children();
-        for (int i = 0; i < children.size(); i++) {
-            GuiEventListener child = children.get(i);
-            JsonObject widget = new JsonObject();
-            widget.addProperty("ref", "w" + i);
-            widget.addProperty("type", child.getClass().getName());
-            widget.addProperty("focused", child.isFocused());
-            if (child instanceof AbstractWidget aw) {
-                widget.addProperty("message", aw.getMessage().getString());
-                widget.addProperty("x", aw.getX());
-                widget.addProperty("y", aw.getY());
-                widget.addProperty("width", aw.getWidth());
-                widget.addProperty("height", aw.getHeight());
-                widget.addProperty("active", aw.active);
-                widget.addProperty("visible", aw.visible);
-            }
-            widgets.add(widget);
-        }
+        appendWidgets(widgets, screen.children(), "w", 0, Collections.newSetFromMap(new IdentityHashMap<>()));
         result.add("widgets", widgets);
 
         if (screen instanceof AbstractContainerScreen<?> containerScreen) {
@@ -187,6 +176,38 @@ public final class Minecraft12110ClientControlProvider implements ClientControlP
         return result;
     }
 
+    private static void appendWidgets(
+            JsonArray widgets,
+            List<? extends GuiEventListener> children,
+            String prefix,
+            int depth,
+            Set<GuiEventListener> visited) {
+        if (depth > 16 || widgets.size() >= 2_048) return;
+        for (int i = 0; i < children.size() && widgets.size() < 2_048; i++) {
+            GuiEventListener child = children.get(i);
+            if (!visited.add(child)) continue;
+            String ref = prefix + i;
+            JsonObject widget = new JsonObject();
+            widget.addProperty("ref", ref);
+            widget.addProperty("depth", depth);
+            widget.addProperty("type", child.getClass().getName());
+            widget.addProperty("focused", child.isFocused());
+            if (child instanceof AbstractWidget aw) {
+                widget.addProperty("message", aw.getMessage().getString());
+                widget.addProperty("x", aw.getX());
+                widget.addProperty("y", aw.getY());
+                widget.addProperty("width", aw.getWidth());
+                widget.addProperty("height", aw.getHeight());
+                widget.addProperty("active", aw.active);
+                widget.addProperty("visible", aw.visible);
+            }
+            widgets.add(widget);
+            if (child instanceof ContainerEventHandler container) {
+                appendWidgets(widgets, container.children(), ref + ".", depth + 1, visited);
+            }
+        }
+    }
+
     @Override
     public JsonObject screenAction(JsonObject payload) throws Exception {
         return onGameThread(() -> {
@@ -204,10 +225,7 @@ public final class Minecraft12110ClientControlProvider implements ClientControlP
             boolean handled;
             switch (action) {
                 case "clickWidget" -> {
-                    int index = widgetIndex(string(payload, "ref", ""));
-                    List<? extends GuiEventListener> children = screen.children();
-                    if (index < 0 || index >= children.size()) throw new IllegalArgumentException("unknown widget ref");
-                    GuiEventListener child = children.get(index);
+                    GuiEventListener child = widgetByRef(screen, string(payload, "ref", ""));
                     if (!(child instanceof AbstractWidget aw))
                         throw new IllegalArgumentException("widget is not clickable");
                     int button = integer(payload, "button", 0);
@@ -241,6 +259,15 @@ public final class Minecraft12110ClientControlProvider implements ClientControlP
                             integer(payload, "key", 256),
                             integer(payload, "scancode", 0),
                             integer(payload, "modifiers", 0)));
+                case "typeText" -> {
+                    String text = string(payload, "text", "");
+                    int modifiers = integer(payload, "modifiers", 0);
+                    int accepted = 0;
+                    for (int codePoint : text.codePoints().toArray()) {
+                        if (screen.charTyped(new CharacterEvent(codePoint, modifiers))) accepted++;
+                    }
+                    handled = accepted == text.codePointCount(0, text.length());
+                }
                 case "close" -> {
                     screen.onClose();
                     handled = true;
@@ -333,11 +360,17 @@ public final class Minecraft12110ClientControlProvider implements ClientControlP
                     sidebarJson.addProperty("name", sidebar.getName());
                     sidebarJson.addProperty("title", sidebar.getDisplayName().getString());
                     JsonArray lines = new JsonArray();
-                    for (PlayerScoreEntry score : scoreboard.listPlayerScores(sidebar)) {
-                        if (score.isHidden()) continue;
+                    for (PlayerScoreEntry score : scoreboard.listPlayerScores(sidebar).stream()
+                            .filter(score -> !score.isHidden())
+                            .sorted((left, right) -> Integer.compare(right.value(), left.value()))
+                            .toList()) {
                         JsonObject line = new JsonObject();
                         line.addProperty("owner", score.owner());
-                        line.addProperty("text", score.ownerName().getString());
+                        line.addProperty(
+                                "text",
+                                PlayerTeam.formatNameForTeam(
+                                                scoreboard.getPlayersTeam(score.owner()), score.ownerName())
+                                        .getString());
                         line.addProperty("score", score.value());
                         lines.add(line);
                     }
@@ -486,13 +519,29 @@ public final class Minecraft12110ClientControlProvider implements ClientControlP
         return new MouseButtonEvent(x, y, new MouseButtonInfo(button, 0));
     }
 
-    private static int widgetIndex(String ref) {
-        if (!ref.startsWith("w")) return -1;
-        try {
-            return Integer.parseInt(ref.substring(1));
-        } catch (NumberFormatException ignored) {
-            return -1;
+    private static GuiEventListener widgetByRef(Screen screen, String ref) {
+        if (!ref.startsWith("w")) throw new IllegalArgumentException("unknown widget ref");
+        String[] parts = ref.substring(1).split("\\.");
+        List<? extends GuiEventListener> children = screen.children();
+        GuiEventListener current = null;
+        for (int depth = 0; depth < parts.length; depth++) {
+            int index;
+            try {
+                index = Integer.parseInt(parts[depth]);
+            } catch (NumberFormatException exception) {
+                throw new IllegalArgumentException("unknown widget ref");
+            }
+            if (index < 0 || index >= children.size()) throw new IllegalArgumentException("unknown widget ref");
+            current = children.get(index);
+            if (depth + 1 < parts.length) {
+                if (!(current instanceof ContainerEventHandler container)) {
+                    throw new IllegalArgumentException("widget ref traverses a non-container");
+                }
+                children = container.children();
+            }
         }
+        if (current == null) throw new IllegalArgumentException("unknown widget ref");
+        return current;
     }
 
     private static void addComponent(JsonObject target, String key, Component value) {
